@@ -1,0 +1,18 @@
+services:
+  habit-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: habit-tracker:latest
+    container_name: habit-tracker
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # Host persistence on Ubuntu Linux:
+      # Saves the embedded SQLite database directly to ./data/tracker.sqlite on your machine
+      - ./data:/app/data
+    environment:
+      - PORT=3000
+      - DATA_DIR=/app/data
+      - DB_PATH=/app/data/tracker.sqlite

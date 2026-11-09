@@ -1,0 +1,6 @@
+{
+  "name": "Simple Habit Tracker & Daily Planner",
+  "description": "A minimalist personal habit tracker and daily TODO planner with dynamic habit checkbox columns, real-time percentage progress bars, and daily notes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

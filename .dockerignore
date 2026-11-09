@@ -1,0 +1,8 @@
+node_modules
+dist
+data
+.git
+.gitignore
+.env
+.aistudio
+README.md
