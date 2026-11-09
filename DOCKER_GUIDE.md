@@ -17,15 +17,19 @@ This guide covers running the **Simple Habit Tracker** on **Ubuntu Linux** using
 
 ## 2. Quick Start Commands on Ubuntu
 
-### Option A: Using Docker Compose (Single Command)
+### Option A: Using Docker Compose (Recommended)
 ```bash
-# Build image and run in detached mode
+# 1. Stop and remove any old/stalled container from previous attempts
+docker rm -f habit-tracker 2>/dev/null || true
+docker compose down
+
+# 2. Build and start with the latest pre-compiled bundle
 docker compose up -d --build
 
-# View live application and database logs
+# 3. View live server and SQLite logs
 docker compose logs -f
 
-# Stop the container safely
+# 4. Stop the container safely at any time
 docker compose down
 ```
 

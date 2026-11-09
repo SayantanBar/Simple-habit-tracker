@@ -11,19 +11,68 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
 // Data directory and SQLite database path (mounted via Docker volume -v $(pwd)/data:/app/data)
+// Data directory and SQLite database path (mounted via Docker volume -v $(pwd)/data:/app/data)
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-const DB_FILE = process.env.DB_PATH || path.join(DATA_DIR, 'tracker.sqlite');
+const PRIMARY_DB_FILE = process.env.DB_PATH || path.join(DATA_DIR, 'tracker.sqlite');
 
-// Ensure data directory exists on disk
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+let DB_FILE = PRIMARY_DB_FILE;
+
+// Function to safely initialize SQLite database with multi-path fallbacks
+function openSqliteDatabase(): DatabaseSync {
+  const candidatePaths = [
+    PRIMARY_DB_FILE,
+    path.join(process.cwd(), 'data', 'tracker.sqlite'),
+    path.join(process.cwd(), 'tracker.sqlite'),
+    '/tmp/tracker.sqlite'
+  ];
+
+  for (const candidate of candidatePaths) {
+    try {
+      const dir = path.dirname(candidate);
+
+      // Handle accidental directory creation if file was mounted as directory
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+        console.warn(`Warning: ${candidate} is a directory, not a file. Removing directory...`);
+        fs.rmSync(candidate, { recursive: true, force: true });
+      }
+
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
+      }
+      try {
+        fs.chmodSync(dir, 0o777);
+      } catch {
+        // Ignore chmod error if filesystem doesn't support it
+      }
+
+      const instance = new DatabaseSync(candidate);
+      
+      // Try setting WAL mode, fallback to standard rollback journal if WAL is unsupported
+      try {
+        instance.exec('PRAGMA journal_mode = WAL;');
+      } catch {
+        try {
+          instance.exec('PRAGMA journal_mode = DELETE;');
+        } catch {
+          // Ignore pragma error if read-only
+        }
+      }
+
+      DB_FILE = candidate;
+      console.log(`[Database] SQLite connected successfully at: ${candidate}`);
+      return instance;
+    } catch (err: any) {
+      console.warn(`[Database] Could not open SQLite database at ${candidate} (${err?.message || err}). Trying next path...`);
+    }
+  }
+
+  // Final fallback to memory database so server never crashes on startup
+  console.warn('[Database] Falling back to in-memory SQLite database.');
+  DB_FILE = ':memory:';
+  return new DatabaseSync(':memory:');
 }
 
-// Initialize embedded SQLite database
-const db = new DatabaseSync(DB_FILE);
-
-// Enable WAL mode (Write-Ahead Logging) for superior concurrent read/write and persistence
-db.exec('PRAGMA journal_mode = WAL;');
+const db = openSqliteDatabase();
 
 // Initialize SQLite schema with structured relational tables
 db.exec(`
@@ -52,70 +101,74 @@ db.exec(`
 `);
 
 // Seed initial template if SQLite database was just created
-const countStmt = db.prepare('SELECT COUNT(*) as count FROM habits');
-const habitCount = (countStmt.get() as any)?.count || 0;
-if (habitCount === 0) {
-  const insertHabit = db.prepare(
-    'INSERT INTO habits (id, name, icon, order_num, created_at) VALUES (?, ?, ?, ?, ?)'
-  );
-  insertHabit.run('h-sleep', 'Sleep 8 Hours', '🛏️', 1, '2026-10-01T00:00:00.000Z');
-  insertHabit.run('h-nutrition', 'Healthy Nutrition', '🍴', 2, '2026-10-01T00:00:00.000Z');
-  insertHabit.run('h-walk', 'Morning Walk / Exercise', '🚶', 3, '2026-10-01T00:00:00.000Z');
-  insertHabit.run('h-study', 'Morning Kubernetes Lecture', '📓', 4, '2026-10-01T00:00:00.000Z');
-  insertHabit.run('h-problems', 'Solve escbash.com problems', '🏋️', 5, '2026-10-01T00:00:00.000Z');
-  insertHabit.run('h-water', 'Hydration 2.5L Water', '💧', 6, '2026-10-01T00:00:00.000Z');
+try {
+  const countStmt = db.prepare('SELECT COUNT(*) as count FROM habits');
+  const habitCount = (countStmt.get() as any)?.count || 0;
+  if (habitCount === 0) {
+    const insertHabit = db.prepare(
+      'INSERT INTO habits (id, name, icon, order_num, created_at) VALUES (?, ?, ?, ?, ?)'
+    );
+    insertHabit.run('h-sleep', 'Sleep 8 Hours', '🛏️', 1, '2026-10-01T00:00:00.000Z');
+    insertHabit.run('h-nutrition', 'Healthy Nutrition', '🍴', 2, '2026-10-01T00:00:00.000Z');
+    insertHabit.run('h-walk', 'Morning Walk / Exercise', '🚶', 3, '2026-10-01T00:00:00.000Z');
+    insertHabit.run('h-study', 'Morning Kubernetes Lecture', '📓', 4, '2026-10-01T00:00:00.000Z');
+    insertHabit.run('h-problems', 'Solve escbash.com problems', '🏋️', 5, '2026-10-01T00:00:00.000Z');
+    insertHabit.run('h-water', 'Hydration 2.5L Water', '💧', 6, '2026-10-01T00:00:00.000Z');
 
-  const insertDay = db.prepare(
-    'INSERT INTO day_logs (id, date_formatted, checks_json, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?)'
-  );
-  insertDay.run(
-    '2026-11-09',
-    'November 9, 2026',
-    JSON.stringify({ 'h-nutrition': true, 'h-problems': true }),
-    JSON.stringify({
-      percentage: 33,
-      completedCount: 2,
-      totalHabitsCount: 6,
-      activeHabitIds: ['h-sleep', 'h-nutrition', 'h-walk', 'h-study', 'h-problems', 'h-water'],
-      savedAt: '2026-11-09T08:00:00.000Z',
-    }),
-    new Date('2026-11-09T00:05:00').toISOString()
-  );
-  insertDay.run(
-    '2026-11-08',
-    'November 8, 2026',
-    JSON.stringify({ 'h-sleep': true, 'h-nutrition': true, 'h-walk': true, 'h-study': true }),
-    JSON.stringify({
-      percentage: 67,
-      completedCount: 4,
-      totalHabitsCount: 6,
-      activeHabitIds: ['h-sleep', 'h-nutrition', 'h-walk', 'h-study', 'h-problems', 'h-water'],
-      savedAt: '2026-11-08T23:59:00.000Z',
-    }),
-    new Date('2026-11-08T00:05:00').toISOString()
-  );
-  insertDay.run(
-    '2026-10-30',
-    'October 30, 2026',
-    JSON.stringify({ 'h-sleep': true, 'h-walk': true, 'h-study': true }),
-    JSON.stringify({
-      percentage: 50,
-      completedCount: 3,
-      totalHabitsCount: 6,
-      activeHabitIds: ['h-sleep', 'h-nutrition', 'h-walk', 'h-study', 'h-problems', 'h-water'],
-      savedAt: '2026-10-30T23:59:00.000Z',
-    }),
-    new Date('2026-10-30T00:05:00').toISOString()
-  );
+    const insertDay = db.prepare(
+      'INSERT INTO day_logs (id, date_formatted, checks_json, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?)'
+    );
+    insertDay.run(
+      '2026-11-09',
+      'November 9, 2026',
+      JSON.stringify({ 'h-nutrition': true, 'h-problems': true }),
+      JSON.stringify({
+        percentage: 33,
+        completedCount: 2,
+        totalHabitsCount: 6,
+        activeHabitIds: ['h-sleep', 'h-nutrition', 'h-walk', 'h-study', 'h-problems', 'h-water'],
+        savedAt: '2026-11-09T08:00:00.000Z',
+      }),
+      new Date('2026-11-09T00:05:00').toISOString()
+    );
+    insertDay.run(
+      '2026-11-08',
+      'November 8, 2026',
+      JSON.stringify({ 'h-sleep': true, 'h-nutrition': true, 'h-walk': true, 'h-study': true }),
+      JSON.stringify({
+        percentage: 67,
+        completedCount: 4,
+        totalHabitsCount: 6,
+        activeHabitIds: ['h-sleep', 'h-nutrition', 'h-walk', 'h-study', 'h-problems', 'h-water'],
+        savedAt: '2026-11-08T23:59:00.000Z',
+      }),
+      new Date('2026-11-08T00:05:00').toISOString()
+    );
+    insertDay.run(
+      '2026-10-30',
+      'October 30, 2026',
+      JSON.stringify({ 'h-sleep': true, 'h-walk': true, 'h-study': true }),
+      JSON.stringify({
+        percentage: 50,
+        completedCount: 3,
+        totalHabitsCount: 6,
+        activeHabitIds: ['h-sleep', 'h-nutrition', 'h-walk', 'h-study', 'h-problems', 'h-water'],
+        savedAt: '2026-10-30T23:59:00.000Z',
+      }),
+      new Date('2026-10-30T00:05:00').toISOString()
+    );
 
-  const insertNote = db.prepare(
-    'INSERT INTO notes (id, text, completed, created_at) VALUES (?, ?, ?, ?)'
-  );
-  insertNote.run('n-1', 'Activate the automatic cat feeder and buy new cans of tuna.', 0, new Date().toISOString());
-  insertNote.run('n-2', 'Check to make sure everything is in place', 0, new Date().toISOString());
-  insertNote.run('n-3', 'Not forget to put my winter playlist in my official library and get all the songs saved in case of stockage loss', 0, new Date().toISOString());
-  insertNote.run('n-4', 'To lock the front and back doors', 0, new Date().toISOString());
-  insertNote.run('n-5', 'Book the restaurant table and prepare surprise for my friends.', 0, new Date().toISOString());
+    const insertNote = db.prepare(
+      'INSERT INTO notes (id, text, completed, created_at) VALUES (?, ?, ?, ?)'
+    );
+    insertNote.run('n-1', 'Activate the automatic cat feeder and buy new cans of tuna.', 0, new Date().toISOString());
+    insertNote.run('n-2', 'Check to make sure everything is in place', 0, new Date().toISOString());
+    insertNote.run('n-3', 'Not forget to put my winter playlist in my official library and get all the songs saved in case of stockage loss', 0, new Date().toISOString());
+    insertNote.run('n-4', 'To lock the front and back doors', 0, new Date().toISOString());
+    insertNote.run('n-5', 'Book the restaurant table and prepare surprise for my friends.', 0, new Date().toISOString());
+  }
+} catch (seedErr) {
+  console.warn('Notice during database initial seeding:', seedErr);
 }
 
 app.use(express.json({ limit: '10mb' }));
@@ -237,7 +290,11 @@ app.post('/api/db', (req: Request, res: Response) => {
       savedAt: new Date().toISOString() 
     });
   } catch (err) {
-    db.exec('ROLLBACK;');
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // Ignore if rollback fails
+    }
     console.error('Failed to write transaction to SQLite:', err);
     return res.status(500).json({ error: 'Failed to update SQLite database' });
   }
@@ -254,5 +311,5 @@ if (fs.existsSync(distPath)) {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Habit Tracker server running on http://0.0.0.0:${PORT}`);
-  console.log(`Embedded SQLite database: ${DB_FILE}`);
+  console.log(`SQLite database active at: ${DB_FILE}`);
 });
